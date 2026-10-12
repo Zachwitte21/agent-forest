@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-forest",
+  "description": "agent-forest: your repo as a Banff forest, with Claude and its subagents at work in it.",
+  "owner": {
+    "name": "Zachary Witte",
+    "url": "https://github.com/Zachwitte21"
+  },
+  "plugins": [
+    {
+      "name": "agent-forest",
+      "source": "./plugins/agent-forest",
+      "description": "Draws your repo as a forest in a side pane: folders are trees, root files are bushes. Claude and its subagents sit at a campfire and walk to the files they read and edit, with a speech bubble saying what they're on.",
+      "category": "productivity",
+      "tags": ["mods", "subagents", "visualization", "desktop"]
+    }
+  ]
+}

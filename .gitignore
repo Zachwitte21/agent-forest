@@ -1,0 +1,5 @@
+# Claude Code writes a plugin's type declarations here on every load.
+.claude-plugin/types/
+plugins/*/.claude-plugin/types/
+node_modules/
+.DS_Store

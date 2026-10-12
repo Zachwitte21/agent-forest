@@ -1,0 +1,10 @@
+{
+  "name": "agent-forest",
+  "version": "1.0.0",
+  "description": "Draws your repo as a forest in a side pane and shows Claude and its subagents walking to the files they read and edit.",
+  "author": { "name": "Zachary Witte", "url": "https://github.com/Zachwitte21" },
+  "homepage": "https://github.com/Zachwitte21/agent-forest",
+  "repository": "https://github.com/Zachwitte21/agent-forest",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
