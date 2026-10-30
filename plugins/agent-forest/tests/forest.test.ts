@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { drawForest, sceneZoom } from '../hooks/draw'
+import { gist, hoverBands } from '../hooks/register'
 import { drawTree } from '../hooks/trees'
 import type { FNode, Forest, Pin } from '../types'
 
@@ -27,14 +28,12 @@ test('a tree grows the same shape every time', () => {
   expect(drawForest(F, [], {}, 0, 600)!.svg).toBe(drawForest(F, [], {}, 0, 600)!.svg)
 })
 
-test('draws a pin mid-walk with a speech bubble naming its file', () => {
+test('draws a pin mid-walk with no speech bubble, its file named for hover', () => {
   const pin = { id: 'main', label: 'Claude', spot: 'n:src/lib/b.ts', from: 'g:', movedAt: 1000, doing: 'read' as const, detail: 'src/lib/b.ts', role: 'lead', reads: 1, writes: 0 }
   const out = drawForest(F, [pin], { 'src/a.ts': { kind: 'write', at: 0 } }, 1300, 600)
   expect(out === null).toBe(false)
   expect(out!.svg).toContain('@keyframes m0')
-  expect(out!.svg).toContain('class="sb"')
-  expect(out!.svg).toContain('>Reading</tspan>')
-  expect(out!.svg).toContain('>b.ts</tspan>')
+  expect(out!.svg).not.toContain('class="sb"')
   expect(out!.svg).toContain('src/lib/b.ts')
 })
 
@@ -135,15 +134,15 @@ test('all eight animals are out in the scene', () => {
   for (const prefix of ['ek', 'gz', 'bb', 'ms', 'bh', 'ln', 'mm', 'eg']) expect(svg).toMatch(new RegExp(`(class|href)="[^"]*\\b#?${prefix}-`))
 })
 
-test('speech bubbles over a crowded tree stack instead of overlapping', () => {
+test('thought bubbles over a crowded tree stack instead of overlapping', () => {
   const pins = ['a.ts', 'lib/b.ts'].flatMap((_, k) =>
-    [0, 1, 2].map(i => ({ id: `p${k}${i}`, label: 'agent', spot: 'n:src/a.ts', from: 'n:src/a.ts', movedAt: 0, doing: 'read' as const, detail: `src/file-${k}${i}.ts`, role: 'reviewer', reads: 1, writes: 0 })),
+    [0, 1, 2].map(i => ({ id: `p${k}${i}`, label: 'agent', spot: 'n:src/a.ts', from: 'n:src/a.ts', movedAt: 0, doing: 'read' as const, detail: `src/file-${k}${i}.ts`, role: 'reviewer', reads: 1, writes: 0, thought: `Checking whether file ${k}${i} matters here.` })),
   )
   const svg = drawForest(F, pins, {}, 0, 900, 800)!.svg
-  // Each bubble's box in the picture: its agent's spot plus the path's first move (left edge, top) and first line (right edge).
-  const boxes = [...svg.matchAll(/translate\((-?[\d.]+) (-?[\d.]+)\) scale\([\d.]+\)"><g[^>]*><g transform="scale\([\d.]+\)"><path class="sb" d="M(-?[\d.]+) (-?[\d.]+)H(-?[\d.]+)/g)].map(m => {
-    const [x, y, l, t, r] = m.slice(1).map(Number) as [number, number, number, number, number]
-    return { x0: x + l, x1: x + r, top: y + t }
+  // Each bubble's box in the picture: its agent's spot plus the rect's left edge, top and width.
+  const boxes = [...svg.matchAll(/translate\((-?[\d.]+) (-?[\d.]+)\) scale\([\d.]+\)"><g[^>]*><g class="tk"[^>]*><g transform="scale\([\d.]+\)"><rect class="sb" x="(-?[\d.]+)" y="(-?[\d.]+)" width="([\d.]+)"/g)].map(m => {
+    const [x, y, l, t, w] = m.slice(1).map(Number) as [number, number, number, number, number]
+    return { x0: x + l, x1: x + l + w, top: y + t }
   })
   expect(boxes.length).toBe(6)
   // Side by side is fine; any two bubbles that share a column stack at least a bubble's height apart.
@@ -214,4 +213,159 @@ test('a small repo zooms the whole scene in, a big one does not', () => {
   expect(small.height).toBe(800)
   const trees: FNode[] = Array.from({ length: 12 }, (_, t) => ({ name: `t${t}`, path: `t${t}`, kind: 'dir', children: [{ name: 'a.ts', path: `t${t}/a.ts`, kind: 'file' }] }))
   expect(box(drawForest({ root: '/b', label: 'b', trees }, [], {}, 0, 900, 800)!.svg)[0]).toBe(900)
+})
+
+test('a subagent sometimes shows its latest thought, the lead never does', () => {
+  const sub: Pin = { id: 'a1', label: 'Explore', spot: 'n:src/a.ts', from: 'n:src/a.ts', movedAt: 0, doing: 'read', detail: 'src/a.ts', role: 'explorer', reads: 1, writes: 0, thought: 'The pane opens from register.tsx so I should check it next.' }
+  const svg = drawForest(F, [sub], {}, 60000, 600)!.svg
+  expect(svg).toContain('class="tk"')
+  expect(svg).toContain('register.tsx so I should')
+  const lead = drawForest(F, [{ ...sub, id: 'main' }], {}, 60000, 600)!.svg
+  expect(lead).not.toContain('class="tk"')
+})
+
+test('a thought keeps the last full sentence, file names whole', () => {
+  expect(gist('Okay. Now I need to **look** at `register.tsx` for the bug.\n\nHmm.')).toBe('Now I need to look at register.tsx for the bug.')
+  expect(gist('')).toBe('')
+  expect(gist('Check forest_test.ts first -> then draw.ts for the bug.')).toBe('Check forest_test.ts first -> then draw.ts for the bug.')
+  expect(gist('> quoted\n## Plan\nThe radio sits too close to the fire. I will now check the')).toBe('The radio sits too close to the fire.')
+})
+
+test('once an agent has waded into the lake, the picture stops replaying the walk', async ($, on) => {
+  const clock = mock.clock(on)
+  await clock.set(1_700_000_000_000)
+  mock.env(on, { HOME: '/home' })
+  on('session.cwd', () => ({ value: '/r' }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.list', ($, e) => ({ value: (DISK[e.path] ?? []).map(en => ({ ...en, size: 0, mtimeMs: 0, isLink: false })) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.panes', () => ({ value: [] }))
+  on('tool.call', () => ({ result: { text: 'ok' } }) as never)
+  await $.command.run({ command: 'forest', args: '/r' } as never)
+  const ui = await $.ui.mount({ plugin: 'agent-forest', surface: 'desktop', component: 'Pane', requestId: 'agent-forest', props: PANE_PROPS })
+  const source = async () => String(((await ui.find({ type: 'Svg' })) as unknown as { props: { source: string } }).props.source)
+  await $.tool.call({ tool: 'WebSearch', query: 'banff' } as never)
+  expect(await source()).toContain('@keyframes m0')
+  await clock.advance(1000)
+  await $.tool.call({ tool: 'WebSearch', query: 'lake louise' } as never)
+  expect(await source()).toContain('@keyframes m0')
+  await clock.advance(5000)
+  expect(await source()).not.toContain('@keyframes m0')
+  await ui.unmount()
+})
+
+test('a finished subagent leaves the picture after a while, even when nothing else happens', async ($, on) => {
+  const clock = mock.clock(on)
+  await clock.set(1_700_000_000_000)
+  mock.env(on, { HOME: '/home' })
+  on('session.cwd', () => ({ value: '/r' }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.list', ($, e) => ({ value: (DISK[e.path] ?? []).map(en => ({ ...en, size: 0, mtimeMs: 0, isLink: false })) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.panes', () => ({ value: [] }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'a1' }) as never)
+  on('turn.complete', () => ({ text: 'done' }))
+  let held: Pin[] = []
+  on('state.set', ($, e, next) => {
+    if ((e as unknown as { key: string }).key === 'pins') held = (e as unknown as { value: Pin[] }).value
+    return next(e)
+  })
+  await $.command.run({ command: 'forest', args: '/r' } as never)
+  await $.agent.spawn({ prompt: 'look around', description: 'Explore wildlife', subagentType: 'Explore' } as never)
+  expect(held.some(p => p.id === 'a1')).toBe(true)
+  await $.turn.complete({ reason: 'answer', answer: 'done', agentId: 'a1' } as never)
+  await clock.advance(60000)
+  expect(held.some(p => p.id === 'a1')).toBe(true)
+  await clock.advance(40000)
+  expect(held.some(p => p.id === 'a1')).toBe(false)
+})
+
+test('hovering an agent out in the forest shows its speech bubble', async ($, on) => {
+  const clock = mock.clock(on)
+  await clock.set(1_700_000_000_000)
+  mock.env(on, { HOME: '/home' })
+  on('session.cwd', () => ({ value: '/r' }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.list', ($, e) => ({ value: (DISK[e.path] ?? []).map(en => ({ ...en, size: 0, mtimeMs: 0, isLink: false })) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.panes', () => ({ value: [] }))
+  on('tool.call', () => ({ result: { text: 'ok' } }) as never)
+  await $.command.run({ command: 'forest', args: '/r' } as never)
+  await $.tool.call({ tool: 'Read', file_path: '/r/src/a.ts' } as never)
+  const ui = await $.ui.mount({ plugin: 'agent-forest', surface: 'desktop', component: 'Pane', requestId: 'agent-forest', props: PANE_PROPS })
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('agent-main')
+  expect(drawn).toContain('Reading')
+  expect(drawn).toContain('a.ts')
+  await ui.unmount()
+})
+
+test('a subagent picked back up after it finished is working again, not cleared as done', async ($, on) => {
+  const clock = mock.clock(on)
+  await clock.set(1_700_000_000_000)
+  mock.env(on, { HOME: '/home' })
+  on('session.cwd', () => ({ value: '/r' }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.list', ($, e) => ({ value: (DISK[e.path] ?? []).map(en => ({ ...en, size: 0, mtimeMs: 0, isLink: false })) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.panes', () => ({ value: [] }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'a1' }) as never)
+  on('tool.call', () => ({ result: { text: 'ok' } }) as never)
+  on('turn.complete', () => ({ text: 'done' }))
+  let held: Pin[] = []
+  on('state.set', ($, e, next) => {
+    if ((e as unknown as { key: string }).key === 'pins') held = (e as unknown as { value: Pin[] }).value
+    return next(e)
+  })
+  await $.command.run({ command: 'forest', args: '/r' } as never)
+  await $.agent.spawn({ prompt: 'look around', description: 'Explore wildlife', subagentType: 'Explore' } as never)
+  await $.turn.complete({ reason: 'answer', answer: 'done', agentId: 'a1' } as never)
+  await clock.advance(10000)
+  await $.tool.call({ tool: 'Read', file_path: '/r/src/a.ts', agentId: 'a1' } as never)
+  const a1 = () => held.find(p => p.id === 'a1')
+  expect(a1()?.endedAt).toBe(undefined)
+  await clock.advance(100000)
+  expect(a1()?.doing).toBe('read')
+})
+
+test('hover patches sit over their sprites in percent of the picture, side by side without overlapping', () => {
+  const box = (id: string, x: number, y: number) => ({ id, x, y, w: 36, h: 30 })
+  const bands = hoverBands([box('a', 400, 500), box('b', 420, 505), box('c', 100, 900), box('d', 600, 100.4)], 800, 1000)
+  // A patch thinner than a percent still gets one, so the bands below it don't start a percent off.
+  expect(bands[0]!.items[0]!.id).toBe('d')
+  expect(bands[0]!.y1 - bands[0]!.y0).toBeGreaterThan(0)
+  const [, top, bottom] = bands
+  // Whole percents: feet at the patch's bottom edge, centred across.
+  expect(top!.items[0]!.x0).toBe(Math.round(((400 - 18) / 800) * 100))
+  expect(top!.items[0]!.y1).toBe(50)
+  // The neighbour starts where the first ends.
+  expect(top!.items[1]!.x0).toBe(top!.items[0]!.x1)
+  expect(bottom!.items[0]!.id).toBe('c')
+})
+
+test("a subagent's thought blocks are kept apart, so one block's last sentence never runs into the next", async ($, on) => {
+  const clock = mock.clock(on)
+  await clock.set(1_700_000_000_000)
+  mock.env(on, { HOME: '/home' })
+  on('session.cwd', () => ({ value: '/r' }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.list', ($, e) => ({ value: (DISK[e.path] ?? []).map(en => ({ ...en, size: 0, mtimeMs: 0, isLink: false })) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.panes', () => ({ value: [] }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'a1' }) as never)
+  on('turn.step', async function* () {
+    yield { kind: 'thinking', index: 0, text: 'The tests all pass.' } as never
+    yield { kind: 'thinking', index: 1, text: 'Now I will read the draw file next' } as never
+    return { turnId: 't1', index: 0, answer: '', toolUses: [] } as never
+  })
+  let held: Pin[] = []
+  on('state.set', ($, e, next) => {
+    if ((e as unknown as { key: string }).key === 'pins') held = (e as unknown as { value: Pin[] }).value
+    return next(e)
+  })
+  await $.command.run({ command: 'forest', args: '/r' } as never)
+  await $.agent.spawn({ prompt: 'look around', description: 'Explore wildlife', subagentType: 'Explore' } as never)
+  for await (const _ of $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1, agentId: 'a1' } as never)) void _
+  await clock.advance(10)
+  expect(held.find(p => p.id === 'a1')?.thought).toBe('The tests all pass.')
 })

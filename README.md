@@ -19,11 +19,11 @@ Then restart the session. You need a Claude Code version with mods support.
 
 ## Use
 
-- The forest opens in a side pane the first time an agent touches a file. Widen the pane for the full scene.
-- `/forest` opens or closes the pane.
+- `/forest` opens or closes the forest in a side pane. It only opens when you ask. Widen the pane for the full scene.
 - `/forest <path>` shows another folder. A bare name like `/forest my-app` is looked for in `~/Dev`, `~/code` and `~/Projects`.
 - `/forest refresh` rescans the folder after big changes.
-- Hover an agent to see its role, what it's doing and how many files it has read and edited. Hover the radio to tune into Claude FM.
+- Subagents show what they're thinking in a thought bubble every so often.
+- Hover an agent to see its role, what it's doing, its latest thought and how many files it has read and edited. Hover the radio to tune into Claude FM.
 
 The scene is drawn in the Claude desktop app. In the terminal the pane shows a short text list of what each agent is doing.
 

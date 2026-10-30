@@ -32,27 +32,8 @@ const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 const clip = (s: string, n: number) => (s.length > n ? '…' + s.slice(-(n - 1)) : s)
 const clipEnd = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s)
 
-// The bubble's two lines: what the agent is doing, then the file, query or memory it's doing it to.
-const BUBBLE_VERB: Partial<Record<Pin['doing'], string>> = { read: 'Reading', write: 'Editing', search: 'Searching', web: 'Searching the web' }
-const BUBBLE_CHARS = 26
 // The monospace font's advance at 10px, for sizing the bubble to its text.
 const BUBBLE_CHAR_PX = 6.1
-
-/** The bubble's text and size, or null when the agent has nothing worth saying. */
-function bubbleText(pin: Pin): { head: string; body: string; w: number } | null {
-  let head = BUBBLE_VERB[pin.doing]
-  let body = pin.detail
-  if (pin.doing === 'memory') {
-    const [verb, ...rest] = pin.detail.split(' ')
-    head = verb === 'saving' ? 'Saving memory' : 'Recalling memory'
-    body = rest.join(' ')
-  }
-  if (!head || !body) return null
-  // A path shows as its file name, keeping any "+2" for the other files in the same command.
-  if (pin.doing === 'read' || pin.doing === 'write') body = body.replace(/^.*\//, '')
-  body = clipEnd(body, BUBBLE_CHARS)
-  return { head, body, w: Math.max(head.length, body.length) * BUBBLE_CHAR_PX + 12 }
-}
 
 const BUBBLE_H = 30
 // The bubble's left edge and its tail, in px from the agent's feet.
@@ -74,15 +55,39 @@ function bubbleLift(x: number, top: number, w: number, placed: Array<{ x0: numbe
   return lift
 }
 
-/**
- * An old-school speech bubble over a busy agent, kept the same size at any depth by undoing the sprite's scale.
- * A lifted bubble keeps its tail on the agent's head.
- */
-function bubble(t: { head: string; body: string; w: number }, s: number, lift: number, dx: number): string {
-  const L = BUBBLE_L + dx, R = r1(L + t.w), head = -(24 * s + 4), B = r1(head - 8 - lift), T = r1(B - BUBBLE_H), r = 5, tx = BUBBLE_TAIL
-  const d = `M${L + r} ${T}H${r1(R - r)}Q${R} ${T} ${R} ${r1(T + r)}V${r1(B - r)}Q${R} ${B} ${r1(R - r)} ${B}H${tx + 9}L${tx + 1} ${r1(head)}L${tx + 3} ${B}H${L + r}Q${L} ${B} ${L} ${r1(B - r)}V${r1(T + r)}Q${L} ${T} ${L + r} ${T}Z`
-  return `<g transform="scale(${Math.round(100 / s) / 100})"><path class="sb" d="${d}"/><text class="sbt" x="${L + 6}" y="${r1(T + 12.5)}"><tspan font-weight="700">${xml(t.head)}</tspan><tspan x="${L + 6}" dy="12">${xml(t.body)}</tspan></text></g>`
+// A subagent's thought bubble shows for about a quarter of each cycle; what an agent is doing lives in its hover card.
+const THINK_S = 30
+const THOUGHT_LINE = 30
+
+/** A thought wrapped onto the bubble's two lines, the second ending in an ellipsis if the thought runs on. */
+function thoughtText(thought: string): { lines: string[]; w: number } {
+  const lines: string[] = []
+  let line = ''
+  for (const word of thought.split(' ')) {
+    if (line && (line + ' ' + word).length > THOUGHT_LINE) {
+      lines.push(line)
+      line = ''
+      if (lines.length === 2) break
+    }
+    line = line ? `${line} ${word}` : word
+  }
+  if (line && lines.length < 2) lines.push(line)
+  const shown = lines.map(l => clipEnd(l, THOUGHT_LINE))
+  if (shown.join(' ').length < thought.length && !shown[shown.length - 1].endsWith('…')) shown[shown.length - 1] = clipEnd(shown[shown.length - 1] + ' …', THOUGHT_LINE)
+  return { lines: shown, w: Math.max(...shown.map(l => l.length)) * BUBBLE_CHAR_PX + 12 }
 }
+
+/** A thought bubble: rounder than the speech bubble, joined to the head by two small puffs instead of a tail. */
+function thoughtBubble(t: { lines: string[]; w: number }, s: number, lift: number, dx: number): string {
+  const L = BUBBLE_L + dx, head = -(24 * s + 4), B = r1(head - 8 - lift), T = r1(B - BUBBLE_H), tx = BUBBLE_TAIL
+  const text = t.lines.map((l, i) => `<tspan x="${L + 6}"${i ? ' dy="12"' : ''}>${xml(l)}</tspan>`).join('')
+  return (
+    `<g transform="scale(${Math.round(100 / s) / 100})"><rect class="sb" x="${L}" y="${T}" width="${r1(t.w)}" height="${BUBBLE_H}" rx="12"/>` +
+    `<circle class="sb" cx="${tx + 4}" cy="${r1(B + 4)}" r="2.6"/><circle class="sb" cx="${tx + 2}" cy="${r1(head - 1.5)}" r="1.5"/>` +
+    `<text class="sbt" font-style="italic" y="${r1(T + 12.5)}">${text}</text></g>`
+  )
+}
+
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
 
 /** Seeded by name, so a tree grows the same shape every time it is drawn. */
@@ -397,7 +402,8 @@ function bushMarkup(name: string, path: string, at: P, s: number, c: Ctx): strin
     `<text class="tx lb bl" x="0" y="11" text-anchor="middle" font-size="8.5">${xml(clipEnd(name, 14))}</text></g>`
   )
 }
-export type Drawn = { svg: string; height: number; seats: Record<string, P>; radio: P }
+/** `spots` is where each agent stands now (its feet) and its scale, and `radio` the radio's, so hover patches can sit right over them. */
+export type Drawn = { svg: string; height: number; spots: Record<string, P & { s: number }>; radio: P & { s: number } }
 type Camp = { fire: P; rx: number; ry: number; lake: { c: P; rx: number; ry: number }; lakeFrom: number; seats: Spot[]; bottom: number; radio: { p: P; s: number } }
 
 export const SEATS = 21
@@ -853,18 +859,17 @@ function attempt(f: Forest, pins: Pin[], touches: Record<string, Touch>, now: nu
   }
   const life = o.wildlife === false ? null : world
   campParts.push(campMarkup(camp, now, life ? wildlife.drawLayer('lake', life) : ''))
-  const seats: Record<string, P> = {}
   const names: string[] = []
   for (const pin of shown) {
     const seat = camp.seats[pin.seat ?? -1]
     if (!seat) continue
-    seats[pin.id] = seat.p
     const isHome = pin.spot.startsWith('f:')
     names.push(`<text class="tx lb${isHome && !pin.endedAt ? '' : ' nm-away'}" x="${r1(seat.p.x)}" y="${r1(seat.p.y + 14 * seat.s)}" text-anchor="middle" font-size="${r1(10.5 * seat.s)}" font-weight="${pin.id === 'main' ? 700 : 500}">${xml(clipEnd(pin.id === 'main' ? 'Claude' : pin.label, 15))}</text>`)
   }
 
   // Nearer sprites paint over farther ones; anyone mid-hop paints over everyone.
   const order = shown.map((pin, i) => ({ pin, i, y: perch(pin, pin.spot).p.y, moving: now - pin.movedAt < MOVE_MS })).sort((a, b) => Number(a.moving) - Number(b.moving) || a.y - b.y)
+  const spots: Record<string, P & { s: number }> = {}
   order.forEach(({ pin, i }) => {
     const to = perch(pin, pin.spot)
     if (!/^[flm]:/.test(pin.spot)) {
@@ -873,6 +878,7 @@ function attempt(f: Forest, pins: Pin[], touches: Record<string, Touch>, now: nu
       crowd.set(key, n + 1)
       to.p.x += (n % 2 ? -1 : 1) * Math.ceil(n / 2) * 22 * to.s
     }
+    spots[pin.id] = { x: to.p.x, y: to.p.y, s: to.s }
     const from = perch(pin, pin.from)
     const elapsed = now - pin.movedAt
     let style = ''
@@ -893,14 +899,17 @@ function attempt(f: Forest, pins: Pin[], touches: Record<string, Touch>, now: nu
     }
     const busy = pin.doing !== 'idle' && !pin.endedAt
     // Bubbles paint above every sprite, so they ride along in their own copy of the sprite's walk.
-    const text = busy ? bubbleText(pin) : null
-    if (text) {
-      // Slid sideways to stay inside the picture; the tail still points at the agent.
-      const dx = r1(clamp(W - 6 - (to.p.x + BUBBLE_L + text.w), 6 - (to.p.x + BUBBLE_L), 0))
-      const lift = bubbleLift(to.p.x + dx, to.p.y - 24 * to.s - 12, text.w, placedBubbles)
+    const idea = busy && pin.id !== 'main' && pin.thought ? thoughtText(pin.thought) : null
+    if (idea) {
+      // Slid sideways to stay inside the picture; the puffs still lead to the agent.
+      const dx = r1(clamp(W - 6 - (to.p.x + BUBBLE_L + idea.w), 6 - (to.p.x + BUBBLE_L), 0))
+      const lift = bubbleLift(to.p.x + dx, to.p.y - 24 * to.s - 12, idea.w, placedBubbles)
       // Mid-walk, the bubble waits and pops up as the agent arrives, so a crowd setting off together doesn't drag a pile of bubbles along.
       const wait = style ? ` class="sbi" style="animation-delay:${Math.round(MOVE_MS - elapsed)}ms"` : ''
-      bubbles.push({ lift, svg: `<g transform="translate(${r1(to.p.x)} ${r1(to.p.y)}) scale(${r1(to.s * 100) / 100})"><g${wait}>${bubble(text, to.s, lift, dx)}</g></g>` })
+      // Each agent thinks at its own point in the cycle, so a crowd doesn't all go quiet at once.
+      const phase = `animation-delay:${r1(-((now / 1000 + seeded(pin.id)() * THINK_S) % THINK_S))}s`
+      const think = `<g class="tk" style="${phase}">${thoughtBubble(idea, to.s, lift, dx)}</g>`
+      bubbles.push({ lift, svg: `<g transform="translate(${r1(to.p.x)} ${r1(to.p.y)}) scale(${r1(to.s * 100) / 100})"><g${wait}>${think}</g></g>` })
     }
     const what = pin.endedAt ? 'done' : [VERB[pin.doing], pin.detail].filter(Boolean).join(' ')
     // Wading in the lake: a ripple ring at the waterline, once the hop has landed.
@@ -932,20 +941,22 @@ function attempt(f: Forest, pins: Pin[], touches: Record<string, Touch>, now: nu
     `.gr{stroke:#4f7a3a}.cp{fill:#24231f}.cpl{stroke:#3b372d}.cd{fill:#2c2b27;stroke:#45413a}.tx{fill:#dedad0}.tm{fill:#9a968c}.rl{fill:#e88d67}.lb{stroke:#232a20}.bu{fill:#3f6a30}.b1{fill:#2f5223}.b2{fill:#3a632b}.b3{fill:#4a7637}.rk{fill:#4a4842}.fw{fill:#cfcfcf}}` +
     `.bob{animation:bob .5s ease-in-out infinite alternate}@keyframes bob{to{transform:translateY(-3px)}}` +
     `.pu{animation:pu 1s ease-in-out 4}@keyframes pu{50%{opacity:.35}}` +
-    `@media (prefers-reduced-motion: reduce){.bob,.pu,.cl{animation:none}}` +
+    `.tk{opacity:0;animation:tk ${THINK_S}s linear infinite}@keyframes tk{2%,26%{opacity:1}28%{opacity:0}}` +
+    `@media (prefers-reduced-motion: reduce){.bob,.pu,.cl{animation:none}.tk{display:none}}` +
     styles.join('')
   const sceneCss = css + CAMP_CSS + LIGHTING_CSS
   // Higher bubbles first, so a lower bubble paints over the long tail reaching past it.
   const bubbleMarkup = bubbles.sort((a, b) => b.lift - a.lift).map(b => b.svg).join('')
+  // A natural size far past any pane: the desktop shrinks a picture to its pane's width but never stretches one.
   const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" class="${tod.phase}" width="100%" height="100%" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" class="${tod.phase}" width="${W * 8}" height="${H * 8}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">` +
     `<style>${sceneCss}${TREE_CSS}${backdrop.CSS}${life ? wildlife.CSS : ''}</style><defs>${CAMP_DEFS}${TREE_DEFS}${backdrop.DEFS}${life ? wildlife.DEFS : ''}<path id="lf" d="M0 0Q4.5 -4 0 -10Q-4.5 -4 0 0Z"/>${clawdDefs(shown.map(p => p.role), 2.4)}` +
     `<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="s0"/><stop offset=".72" class="s2"/><stop offset="1" class="s1"/></linearGradient>` +
     `<radialGradient id="hgg"><stop offset="0" class="h0"/><stop offset="1" class="h0" stop-opacity="0"/></radialGradient><radialGradient id="fgg"><stop offset="0" class="fg0"/><stop offset="1" class="fg0" stop-opacity="0"/></radialGradient>` +
     `<linearGradient id="gd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="g0"/><stop offset="1" class="g1"/></linearGradient></defs>` +
     `<g>${parts.slice(0, 2).join('')}${life ? wildlife.drawLayer('sky', life) + wildlife.drawLayer('slopes', life) : ''}${parts.slice(2, 7).join('')}${backdropSvg}${[...layers, ...(life ? wildlife.drawGround(life) : [])].sort((a, b) => a.y - b.y).map(l => l.svg).join('')}${campParts.join('')}` +
     `<rect class="tint" width="${W}" height="${H}"/><ellipse class="fg" cx="${r1(camp.fire.x)}" cy="${r1(camp.fire.y - 10)}" rx="${r1(camp.rx * 1.1)}" ry="${r1(camp.ry * 1.9)}" fill="url(#fgg)"/>${names.join('')}${sprites.join('')}${bubbleMarkup}</g></svg>`
-  return { svg, height: H, seats, radio: camp.radio.p }
+  return { svg, height: H, spots, radio: { ...camp.radio.p, s: camp.radio.s } }
 }
 
 /** Draws the scene at W x H (H defaults to a landscape shape), shedding tooltips, leaves and depth until it fits the Svg budget. */
@@ -967,8 +978,8 @@ export function drawForest(f: Forest, pins: Pin[], touches: Record<string, Touch
     const out = attempt(f, pins, touches, now, w, h, o)
     if (out.svg.length > SVG_BUDGET) continue
     // The svg scales itself to the pane, but the hover patches are placed in pane pixels.
-    const up = (p: P) => ({ x: p.x * zoom, y: p.y * zoom })
-    return { ...out, height: H, seats: Object.fromEntries(Object.entries(out.seats).map(([id, p]) => [id, up(p)])), radio: up(out.radio) }
+    const up = (p: P & { s: number }) => ({ x: p.x * zoom, y: p.y * zoom, s: p.s * zoom })
+    return { ...out, height: H, spots: Object.fromEntries(Object.entries(out.spots).map(([id, p]) => [id, up(p)])), radio: up(out.radio) }
   }
   return null
 }
