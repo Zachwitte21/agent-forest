@@ -17,10 +17,10 @@ export function draw(rx: number, ry: number): string {
 
   // Wobbly closed ring, smoothed by curving through midpoints of jittered polar points.
   // Ragged, uneven edges: many points, each pushed in or out at random, so neither ring reads as a drawn ellipse.
-  const blob = (a: number, b: number, j: number, n = 22) => {
+  const blob = (a: number, b: number, j: number, n = 22, east = 0) => {
     const p: number[][] = [];
     for (let i = 0; i < n; i++) {
-      const t = (i / n) * 6.283, m = 1 - j + R() * j * 2;
+      const t = (i / n) * 6.283, w = east ? Math.max(0, Math.cos(t)) ** 2 : 0, m = (1 - j + R() * j * 2) * (1 - w) + (1 + east) * w;
       p.push([a * m * Math.cos(t), b * m * Math.sin(t)]);
     }
     const mid = (i: number) => {
@@ -33,7 +33,8 @@ export function draw(rx: number, ry: number): string {
   };
 
   // Outside: grass worn pale by feet, out past the outer logs. Inside: bare dirt around the fire and the inner logs.
-  let o = `<path class="cg-o" d="${blob(rx * 1.24, ry * 1.52, 0.11)}"/>`;
+  // The seed's points on the right land in a vertical line, so that side follows a smooth arc instead of the jitter.
+  let o = `<path class="cg-o" d="${blob(rx * 1.24, ry * 1.52, 0.11, 22, 0.04)}"/>`;
   for (let i = 0; i < 26; i++) {
     const t = R() * 6.283, r = 0.8 + R() * 0.38;
     o += `<ellipse class="cg-x" cx="${f(rx * r * Math.cos(t))}" cy="${f(ry * 1.2 * r * Math.sin(t))}" rx="${f((3 + R() * 5) * k)}" ry="${f((1.4 + R() * 2) * k)}"/>`;

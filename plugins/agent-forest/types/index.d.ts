@@ -37,6 +37,8 @@ export type Pin = {
   queued?: string
   /** When it last went idle, so a stale walk-home timer can tell newer work happened since. */
   idleAt?: number
+  /** The gist of a subagent's latest thinking, for its thought bubble and hover card. */
+  thought?: string
 }
 
 export type Touch = { kind: 'read' | 'write'; at: number }

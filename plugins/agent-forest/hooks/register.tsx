@@ -1,31 +1,35 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Doing, FNode, Forest, Pin, Touch } from '../types'
-import { DONE_KEEP_MS, drawForest, MOVE_MS, ROLE_NAME, SEATS, treeKey, VERB } from './draw'
+import { DONE_KEEP_MS, drawForest, MOVE_MS, ROLE_NAME, SEATS, treeKey } from './draw'
 
 const PANE = 'agent-forest'
 // Asks the dock for as much width as it will give; a width the person dragged still wins.
 const WIDE = 400
-// The desktop pane's cell size in CSS pixels, measured from a 65 x 40 cell pane that was 539 x 794 px.
+// The desktop pane's cell size in CSS pixels. The picture stretches to the pane's width, so their ratio is what counts:
+// a cell is about 2.28 times taller than wide, and guessing taller makes the picture overflow and the pane scroll.
 const COL_PX = 8.3
-const ROW_PX = 19.8
+const ROW_PX = 18.9
 // The pane pads its body, so the drawing stays this far inside the measured size or the pane scrolls.
 const EDGE_X = 24
-const EDGE_Y = 48
-let lastDraw: { key: string; svg: string; seats: Record<string, { x: number; y: number }>; radio: { x: number; y: number } } | null = null
-// The hover card over a seat, in pane cells.
+const EDGE_Y = 40
+type Spot = { x: number; y: number; s: number }
+let lastDraw: { key: string; svg: string; spots: Record<string, Spot>; radio: Spot } | null = null
+// Set by /forest debug: outlines the hover patches, to check them against what they cover.
+let outlinePatches = false
+// The hover card over an agent, in pane cells.
 const CARD = 32
-// The seat's hover patch is this many rows tall; the card sits right on its top edge.
-const SEAT_ROWS = 3
-// The radio stands about this many rows tall above the bottom of its hover patch.
-const RADIO_ROWS = 3
+// The sprite's box in drawing units at scale 1, crown and bob included; its hover patch matches it, so agents side by side keep their own.
+const SPRITE_W = 36
+const SPRITE_H = 30
 // The Claude channel's live address follows whichever stream is on, so a restarted stream's new video id doesn't break it.
 // By channel id rather than @claude: the desktop refuses a raw @ in a link, and an id survives a handle rename.
 const RADIO_URL = 'https://www.youtube.com/channel/UCV03SRZXJEz-hchIAogeJOg/live'
 const RADIO_CARD = 30
-// The radio's hover patch in cells, about twice the radio's own size.
-const RADIO_ZONE = [14, 6]
+// The radio's box in drawing units at scale 1, antenna included, with a little room round it.
+const RADIO_W = 30
+const RADIO_H = 30
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
 const SKIP = new Set(['.git', 'node_modules', 'dist', 'build', 'out', '.next', '.nuxt', '.venv', 'venv', '__pycache__', '.cache', 'target', 'coverage', '.turbo', '.DS_Store', 'Pods', 'DerivedData', 'vendor', '.gradle', '.expo', '.svelte-kit', '.parcel-cache', '.pytest_cache', '.mypy_cache', 'site-packages'])
@@ -117,6 +121,9 @@ function relOf(root: string, p: unknown): string | null {
   if (abs === root) return ''
   return abs.startsWith(root + '/') ? abs.slice(root.length + 1) : null
 }
+
+/** Still on screen: working, or finished less than DONE_KEEP_MS ago. */
+const isLive = (p: Pin, at: number) => !p.endedAt || at - p.endedAt < DONE_KEEP_MS
 
 /** A random free camp seat for a new agent, picked from its id so a redraw never reshuffles it. */
 function pickSeat(list: Pin[], id: string): number {
@@ -216,6 +223,16 @@ const flushing = new Set<string>()
 /** When the agent may set off again: once the walk in has finished and, away from camp, it has stayed a while. */
 const readyAt = (p: Pin) => p.movedAt + MOVE_MS + (p.spot === 'f:' ? 0 : DWELL_MS)
 
+/**
+ * Redraws once a walk has finished, so the picture on show holds the agent standing still.
+ * A picture drawn mid-walk replays that walk from the start whenever the pane reloads it.
+ */
+function redrawAfterWalk($: EngineInterface) {
+  void $.clock.after(MOVE_MS + 100, () => {
+    void update($, tick, n => n + 1)
+  })
+}
+
 /** Sets off for the queued spot once the agent is free to leave, checking again then in case it moved meanwhile. */
 function scheduleFlush($: EngineInterface, id: string, waitMs: number) {
   if (flushing.has(id)) return
@@ -229,6 +246,7 @@ function scheduleFlush($: EngineInterface, id: string, waitMs: number) {
 async function flushMove($: EngineInterface, id: string) {
   const at = await $.clock.now()
   let wait = -1
+  let walked = false
   await update($, pins, list =>
     list.map(p => {
       if (p.id !== id || !p.queued) return p
@@ -237,16 +255,21 @@ async function flushMove($: EngineInterface, id: string) {
         return p
       }
       const { queued, ...rest } = p
-      return queued === p.spot ? rest : { ...rest, from: p.spot, spot: queued, movedAt: at }
+      if (queued === p.spot) return rest
+      walked = true
+      return { ...rest, from: p.spot, spot: queued, movedAt: at }
     }),
   )
   if (wait >= 0) scheduleFlush($, id, wait)
+  if (walked) redrawAfterWalk($)
 }
 
 /** After a turn ends, walks the agent home unless it went back to work in the meantime. */
 function scheduleHome($: EngineInterface, id: string, idleAt: number, waitMs: number) {
   void $.clock.after(waitMs, () => {
-    void update($, pins, list => list.map(p => (p.id === id && p.idleAt === idleAt && p.spot !== 'f:' ? { ...p, queued: 'f:' } : p))).then(() => flushMove($, id))
+    void update($, pins, list => list.map(p => (p.id === id && p.idleAt === idleAt && p.spot !== 'f:' ? { ...p, queued: 'f:' } : p)))
+      .then(() => flushMove($, id))
+      .catch(() => {})
   })
 }
 
@@ -262,8 +285,9 @@ async function movePin($: EngineInterface, agentId: string | undefined, m: Move)
   const f = await read($, forest)
   const id = agentId ?? 'main'
   let wait = -1
+  let walked = false
   await update($, pins, list => {
-    const live = list.filter(p => !p.endedAt || at - p.endedAt < DONE_KEEP_MS)
+    const live = list.filter(p => isLive(p, at))
     const was = live.find(p => p.id === id)
     const base: Pin = was ?? {
       id,
@@ -282,17 +306,21 @@ async function movePin($: EngineInterface, agentId: string | undefined, m: Move)
     const n = m.touch ? (m.touches?.length ?? 1) : 0
     const counted = { ...base, reads: base.reads + (m.touch === 'read' ? n : 0), writes: base.writes + (m.touch === 'write' ? n : 0) }
     // What it's doing changes at once; where it stands waits until it has stayed put long enough.
-    const { queued: _, ...settled } = { ...counted, doing: m.doing, detail: m.detail, idleAt: undefined }
+    // Working again means not done, for a subagent picked back up after it finished, or the cleanup would drop it mid-task.
+    const { queued: _, ...settled } = { ...counted, doing: m.doing, detail: m.detail, idleAt: undefined, endedAt: undefined }
     let moved: Pin
     if (spot === base.spot) moved = settled
-    else if (at >= readyAt(base)) moved = { ...settled, from: base.spot, spot, movedAt: at }
-    else {
+    else if (at >= readyAt(base)) {
+      moved = { ...settled, from: base.spot, spot, movedAt: at }
+      walked = true
+    } else {
       moved = { ...settled, queued: spot }
       wait = readyAt(base) - at
     }
     return was ? live.map(p => (p.id === id ? moved : p)) : [...live, moved]
   })
   if (wait >= 0) scheduleFlush($, id, wait)
+  if (walked) redrawAfterWalk($)
   if (m.touch && m.rel) {
     const kind = m.touch
     const rels = m.touches ?? [m.rel]
@@ -302,6 +330,33 @@ async function movePin($: EngineInterface, agentId: string | undefined, m: Move)
       return next
     })
   }
+}
+
+// A thought is cut to this many characters before it is kept.
+const THOUGHT_CHARS = 140
+
+/**
+ * gist
+ * The last full sentence of what a subagent was thinking, with markdown and line breaks gone.
+ */
+export function gist(raw: string): string {
+  // Only markdown's own marks go: headings and quotes at a line's start, bold, italics and code ticks.
+  // A lone _ or > stays, so forest_test.ts and -> come through whole.
+  const flat = raw
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^[ \t]*(#{1,6}|>)[ \t]?/gm, '')
+    .replace(/\*+|`|\b__|__\b/g, '')
+    // A line that ends without a stop (a heading, a list item) still ends there, or it runs into the next sentence.
+    .replace(/([^.!?:\s])[ \t]*\n+/g, '$1.\n')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!flat) return ''
+  // Split only where a stop meets a space, so a file name like register.tsx stays whole.
+  const sentences = flat.split(/(?<=[.!?])\s+/)
+  const long = (x: string) => x.split(' ').length >= 4
+  // A finished sentence beats a tail cut off mid-thought, which is all a step stopped early leaves at the end.
+  const pick = [...sentences].reverse().find(x => long(x) && /[.!?]$/.test(x)) ?? [...sentences].reverse().find(long) ?? sentences[sentences.length - 1]
+  return pick.length > THOUGHT_CHARS ? pick.slice(0, THOUGHT_CHARS - 1).trimEnd() + '…' : pick
 }
 
 // Where a bare name like "my-app" is looked for, under the home folder.
@@ -325,17 +380,66 @@ async function rescan($: EngineInterface, root: string) {
   await update($, touches, () => ({}))
 }
 
-// Opens the pane once per load, on the first sign of work, rather than at every session start.
-let hasAutoOpened = false
+// The day/night timer of this load; a resumed or cleared session runs session.start again, and must not add a second.
+let ticker: Timer | null = null
+
+const SPEECH: Record<Doing, string> = { read: 'Reading', write: 'Editing', search: 'Searching', web: 'Searching the web', memory: 'Recalling memory', work: 'Working', idle: 'Taking a break' }
+
+/** The speech bubble's two lines: what the agent is doing, then the file, query or memory it's doing it to. */
+function speech(p: Pin): [string, string] {
+  if (p.endedAt) return ['Done', p.label]
+  if (p.doing === 'memory') {
+    const [verb, ...rest] = p.detail.split(' ')
+    return [verb === 'saving' ? 'Saving memory' : 'Recalling memory', rest.join(' ')]
+  }
+  // A path shows as its file name, keeping any "+2" for the other files in the same command.
+  const body = p.doing === 'read' || p.doing === 'write' ? p.detail.replace(/^.*\//, '') : p.detail
+  if (p.doing === 'idle') return [SPEECH.idle, p.spot.startsWith('f:') ? 'at the campfire' : 'in the forest']
+  return [SPEECH[p.doing], body]
+}
+
+// The desktop takes whole percentages only.
+const pct = (n: number) => `${Math.max(0, n)}%`
+
+/** Something to hover: its feet at (x, y) in drawing units, w across and h tall. */
+type Hoverable = { id: string; x: number; y: number; w: number; h: number }
+type Patch = { id: string; x0: number; x1: number; y0: number; y1: number }
+
+/**
+ * hoverBands
+ * Lays each hover patch out in whole percent of the picture, in bands down it and left to right in each, edges rounded from the corner so no error adds up.
+ */
+export function hoverBands(boxes: Hoverable[], W: number, H: number): Array<{ y0: number; y1: number; items: Patch[] }> {
+  const r = (n: number) => Math.round(Math.min(1, Math.max(0, n)) * 100)
+  const patches = boxes.map(b => {
+    const y1 = r(b.y / H)
+    // At least one percent tall, here rather than when drawn, or the bands below would start a percent off.
+    return { id: b.id, x0: r((b.x - b.w / 2) / W), x1: r((b.x + b.w / 2) / W), y0: Math.min(r((b.y - b.h) / H), y1 - 1), y1 }
+  })
+  const bands: Array<{ y0: number; y1: number; items: Patch[] }> = []
+  for (const p of [...patches].sort((a, b) => a.y0 - b.y0)) {
+    const last = bands[bands.length - 1]
+    if (last && p.y0 < last.y1) {
+      last.items.push(p)
+      last.y1 = Math.max(last.y1, p.y1)
+    } else bands.push({ y0: p.y0, y1: p.y1, items: [p] })
+  }
+  for (const band of bands) {
+    // A patch overlapping its left neighbour is trimmed to start where that one ends.
+    band.items.sort((a, b) => a.x0 - b.x0)
+    let edge = 0
+    band.items = band.items.flatMap(it => {
+      const x0 = Math.max(it.x0, edge)
+      if (it.x1 - x0 < 1) return []
+      edge = it.x1
+      return [{ ...it, x0 }]
+    })
+  }
+  return bands
+}
 
 async function isOpen($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(p => p.id === PANE)
-}
-
-async function autoOpen($: EngineInterface) {
-  if (hasAutoOpened) return
-  hasAutoOpened = true
-  if (!(await isOpen($))) void $.ui.open({ id: PANE, title: 'Agent forest', columns: WIDE })
 }
 
 export const register: Register = on => {
@@ -350,14 +454,16 @@ export const register: Register = on => {
     const at = await $.clock.now()
     // Pins kept from an older load may predate roles and counts.
     await update($, pins, list => list.map(p => ({ ...p, role: p.role ?? (p.id === 'main' ? 'lead' : 'developer'), reads: p.reads ?? 0, writes: p.writes ?? 0 })))
-    await update($, pins, list => list.reduce<Pin[]>((acc, p) => [...acc, p.seat === undefined ? { ...p, seat: pickSeat(acc, p.id) } : p], []))
+    // Every seat already held counts as taken, not just those handed out so far, or a later pin's seat could be given away twice.
+    await update($, pins, list => list.reduce<Pin[]>((acc, p) => [...acc, p.seat === undefined ? { ...p, seat: pickSeat([...acc, ...list], p.id) } : p], []))
     await update($, pins, list =>
       list.some(p => p.id === 'main')
         ? list
         : [...list, { id: 'main', label: 'Claude', spot: 'f:', from: 'f:', movedAt: 0, doing: 'idle', detail: '', role: 'lead', reads: 0, writes: 0, seat: pickSeat(list, `main-${at}`) }],
     )
     if (!(await read($, forest))) void rescan($, await $.session.cwd())
-    $.clock.every(TICK_MS, () => {
+    ticker?.cancel()
+    ticker = $.clock.every(TICK_MS, () => {
       void update($, tick, n => n + 1)
     })
     return r
@@ -365,6 +471,11 @@ export const register: Register = on => {
 
   on('command.run', { command: 'forest' }, async ($, e) => {
     const arg = String(e.args ?? '').trim()
+    if (arg === 'debug') {
+      outlinePatches = !outlinePatches
+      await update($, tick, n => n + 1)
+      return { text: `Hover patches ${outlinePatches ? 'outlined' : 'hidden'}.` }
+    }
     if (!arg) {
       if (await isOpen($)) {
         await $.ui.close({ id: PANE })
@@ -392,7 +503,6 @@ export const register: Register = on => {
       const f = await read($, forest)
       const m = classify(e.tool, e as unknown as Record<string, unknown>, f?.root ?? (await $.session.cwd()))
       await movePin($, e.agentId, m)
-      if (m.rel !== null) await autoOpen($)
     } catch {
       // Drawing is never worth failing a tool call over.
     }
@@ -415,7 +525,7 @@ export const register: Register = on => {
       const at = await $.clock.now()
       const agentId = r.agentId
       await update($, pins, list => {
-        const live = list.filter(p => !p.endedAt || at - p.endedAt < DONE_KEEP_MS)
+        const live = list.filter(p => isLive(p, at))
         return [
           ...live.filter(p => p.id !== agentId),
           {
@@ -434,12 +544,42 @@ export const register: Register = on => {
           },
         ]
       })
-      await autoOpen($)
     } catch {
       // Same as above.
     }
     return r
   }).catch(($, e, next) => next(e))
+
+  // Subagents only: the lead's thinking is already on screen in the transcript.
+  on('turn.step', async function* ($, e, next) {
+    if (!e.agentId) {
+      yield* next(e)
+      return
+    }
+    let thinking = ''
+    let said = ''
+    // A new block starts a new sentence, so blocks never run together as "pass.Now I'll".
+    const last = { thinking: -1, text: -1 }
+    const add = (kind: 'thinking' | 'text', index: number, text: string, to: string) => {
+      const gap = last[kind] !== -1 && last[kind] !== index && to && !/\s$/.test(to) ? ' ' : ''
+      last[kind] = index
+      return to + gap + text
+    }
+    // In a finally so a step cut short, by an interrupt or an abort, still leaves what it thought so far.
+    try {
+      for await (const c of next(e)) {
+        if (c.kind === 'thinking') thinking = add('thinking', c.index, c.text, thinking)
+        else if (c.kind === 'text') said = add('text', c.index, c.text, said)
+        yield c
+      }
+    } finally {
+      // Some steps stream no thinking; what the agent says between tool calls is the next best thing.
+      // A step with neither clears the old thought, so the bubble never shows one from several steps back.
+      const thought = gist(thinking) || gist(said) || undefined
+      const id = e.agentId
+      void update($, pins, list => (list.some(p => p.id === id && p.thought !== thought) ? list.map(p => (p.id === id ? { ...p, thought } : p)) : list)).catch(() => {})
+    }
+  })
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
@@ -451,6 +591,14 @@ export const register: Register = on => {
         list.map(p => (p.id === id ? { ...p, doing: 'idle' as const, detail: '', idleAt: at, ...(e.agentId ? { endedAt: at } : {}) } : p)),
       )
       scheduleHome($, id, at, e.agentId ? LINGER_MS.sub : LINGER_MS.main)
+      // Nothing else may happen for a while, so a finished subagent is cleared on a timer rather than by the next agent's move.
+      if (e.agentId)
+        void $.clock.after(DONE_KEEP_MS + 100, () => {
+          void $.clock
+            .now()
+            .then(t => update($, pins, list => list.filter(p => isLive(p, t))))
+            .catch(() => {})
+        })
     } catch {
       // Same as above.
     }
@@ -472,77 +620,97 @@ export const register: Register = on => {
       const H = Math.max(320, Math.floor((e.props.scroll?.bodyRows || 30) * ROW_PX) - EDGE_Y)
 
       // The lead and up to twenty subagents, each on the camp seat it was given at random.
-      const agents = [...list.filter(p => p.id === 'main'), ...list.filter(p => p.id !== 'main').slice(-(SEATS - 1))]
+      const live = list.filter(p => isLive(p, now))
+      const agents = [...live.filter(p => p.id === 'main'), ...live.filter(p => p.id !== 'main').slice(-(SEATS - 1))]
 
-      // Drawn at the pane's exact size as an image: an interactive frame reloads, and flashes, on every resize.
+      // Cells to pixels is a guess (the pane reports no pixels), so W and H set the picture's shape, and the picture fills the pane's width.
+      // Drawn as an image: an interactive frame reloads, and flashes, on every resize.
       // A new source reloads the picture, so a redraw that changes nothing it shows hands back the same one.
-      const key = JSON.stringify([W, H, f.root, f.trees.length, agents, t, Math.floor(now / TICK_MS)])
+      // A click focuses the pane and the picture reloads, replaying from when it was drawn, so focus earns a fresh one.
+      const walking = agents.map(p => now - p.movedAt < MOVE_MS)
+      const key = JSON.stringify([W, H, f.root, f.trees.length, agents, walking, t, Math.floor(now / TICK_MS), e.props.isFocused])
       if (!lastDraw || lastDraw.key !== key) {
         const out = drawForest(f, agents, t, now, W, H)
         if (!out) return <Text dimColor>This folder is too big to draw. Try /forest with a subfolder.</Text>
-        lastDraw = { key, svg: out.svg, seats: out.seats, radio: out.radio }
+        lastDraw = { key, svg: out.svg, spots: out.spots, radio: out.radio }
       }
-      const seats = lastDraw.seats
-      const radioLeft = clamp(Math.round(lastDraw.radio.x / COL_PX) - RADIO_ZONE[0] / 2, 0, cols - RADIO_ZONE[0])
-      // Counted up from the picture's bottom edge: the camp sits there, and rows counted down from the top drift by the bottom.
-      const radioBottom = Math.max(0, Math.round((H - lastDraw.radio.y) / ROW_PX) - 1)
+      const { spots, radio } = lastDraw
+      const byId = new Map(agents.map(p => [p.id, p]))
+      const boxes: Hoverable[] = [
+        ...agents.flatMap(p => (spots[p.id] ? [{ id: p.id, x: spots[p.id]!.x, y: spots[p.id]!.y, w: SPRITE_W * spots[p.id]!.s, h: SPRITE_H * spots[p.id]!.s }] : [])),
+        { id: 'radio', x: radio.x, y: radio.y + 2 * radio.s, w: RADIO_W * radio.s, h: RADIO_H * radio.s },
+      ]
+      const outline = outlinePatches ? { borderStyle: 'single' as const, borderColor: '#ff0000' } : {}
 
       return (
         <Box flexDirection="column">
-          <Svg key="forest" source={lastDraw.svg} alt={`${f.label}: ${f.trees.length} trees`} width={W} height={H} />
-          {agents.map(p => {
-            const seat = seats[p.id]
-            if (!seat) return null
-            // An invisible patch of cells over the seat holds the hover card; the picture itself can't take hover.
-            const left = clamp(Math.round(seat.x / COL_PX) - 4, 0, cols - 8)
-            const bottom = Math.max(0, Math.round((H - seat.y) / ROW_PX) - 1)
-            const cardLeft = clamp(-Math.round((CARD - 8) / 2), -left, cols - CARD - left)
-            const verb = p.endedAt ? 'done' : p.doing === 'memory' ? 'at the fire' : p.doing === 'web' ? 'in the lake' : VERB[p.doing]
-            return (
-              <Box key={`seat-${p.id}`} position="absolute" left={left} bottom={bottom} width={8} height={SEAT_ROWS}>
-                <Box
-                  position="absolute"
-                  // Anchored by its bottom so the card sits just over the agent's head however many lines it wraps to.
-                  bottom={SEAT_ROWS}
-                  left={cardLeft}
-                  width={CARD}
-                  display="none"
-                  hover={{ display: 'flex' }}
-                  flexDirection="column"
-                  borderStyle="round"
-                  // Always the dark card with light text: the theme setting can't be read reliably here, and dark-on-dark was unreadable.
-                  borderColor="#5a554b"
-                  backgroundColor="#2c2b27"
-                  paddingX={1}
-                >
-                  <Text bold wrap="wrap" color="#ffffff">{p.id === 'main' ? 'Claude' : p.label}</Text>
-                  <Text color="#f2efe6"><Text color="#e88d67" bold>{ROLE_NAME[p.role] ?? 'Agent'}</Text> · {verb}</Text>
-                  {p.detail ? <Text wrap="truncate-start" color="#c9c5ba">{p.detail}</Text> : <Text color="#c9c5ba">{p.spot.startsWith('f:') ? 'at the campfire' : 'in the forest'}</Text>}
-                  <Text color="#c9c5ba">{p.reads} read · {p.writes} edited</Text>
-                </Box>
-              </Box>
-            )
-          })}
-          {/* A wide patch around the radio, well past its edges, so the card shows wherever on it the pointer lands. */}
-          <Box key="radio" position="absolute" left={radioLeft} bottom={radioBottom} width={RADIO_ZONE[0]} height={RADIO_ZONE[1]}>
-            <Box
-              position="absolute"
-              // Sits right on top of the radio: no gap to lose the hover in on the way up to the button.
-              bottom={RADIO_ROWS}
-              left={clamp(-Math.round((RADIO_CARD - RADIO_ZONE[0]) / 2), -radioLeft, cols - RADIO_CARD - radioLeft)}
-              width={RADIO_CARD}
-              display="none"
-              hover={{ display: 'flex' }}
-              flexDirection="column"
-              borderStyle="round"
-              borderColor="#5a554b"
-              backgroundColor="#2c2b27"
-              paddingX={1}
-            >
-              <Text bold color="#ffffff">Claude FM</Text>
-              <Text color="#c9c5ba">music for thinking and building</Text>
-              <Button key="radio-play" variant="primary" onPress={() => $.process.run(['open', RADIO_URL])}>▶ Listen live</Button>
-            </Box>
+          <Svg key="forest" source={lastDraw.svg} alt={`${f.label}: ${f.trees.length} trees`} />
+          {/* One layer over the whole picture; each patch is placed in percent of it, so a wrong guess at the cell size moves nothing. */}
+          <Box position="absolute" left={0} right={0} top={0} bottom={0} flexDirection="column">
+            {hoverBands(boxes, W, H).flatMap((band, i, all) => [
+              <Box height={pct(band.y0 - (i ? all[i - 1]!.y1 : 0))} flexShrink={0} />,
+              // Each patch fills its band's full height: neighbours in a band stand side by side, so the extra rows cover no one else.
+              <Box height={pct(band.y1 - band.y0)} flexShrink={0} flexDirection="row">
+                {band.items.flatMap((it, j, row) => {
+                  const isRadio = it.id === 'radio'
+                  const width = isRadio ? RADIO_CARD : CARD
+                  const across = Math.max(1, Math.round(((it.x1 - it.x0) / 100) * cols))
+                  const leftCells = Math.round((it.x0 / 100) * cols)
+                  const cardLeft = clamp(-Math.round((width - across) / 2), -leftCells, cols - width - leftCells)
+                  const p = byId.get(it.id)
+                  const [head, body] = p ? speech(p) : ['', '']
+                  return [
+                    <Box width={pct(it.x0 - (j ? row[j - 1]!.x1 : 0))} flexShrink={0} />,
+                    <Box key={isRadio ? 'radio' : `agent-${it.id}`} width={pct(it.x1 - it.x0)} height="100%" flexShrink={0} flexDirection="column" {...outline}>
+                      {/* A zero-height anchor on the patch's top edge, so the card sits right on top with no gap to lose the hover in. */}
+                      <Box height={0}>
+                        {isRadio ? (
+                          <Box
+                            position="absolute"
+                            bottom={0}
+                            left={cardLeft}
+                            width={RADIO_CARD}
+                            display="none"
+                            hover={{ display: 'flex' }}
+                            flexDirection="column"
+                            borderStyle="round"
+                            borderColor="#5a554b"
+                            backgroundColor="#2c2b27"
+                            paddingX={1}
+                          >
+                            <Text bold color="#ffffff">Claude FM</Text>
+                            <Text color="#c9c5ba">music for thinking and building</Text>
+                            <Button key="radio-play" variant="primary" onPress={() => $.process.run(['open', RADIO_URL])}>▶ Listen live</Button>
+                          </Box>
+                        ) : p ? (
+                          <Box
+                            position="absolute"
+                            bottom={0}
+                            left={cardLeft}
+                            width={CARD}
+                            display="none"
+                            hover={{ display: 'flex' }}
+                            flexDirection="column"
+                            borderStyle="round"
+                            // The old-school speech bubble: dark text on white, set outright so neither theme can turn it unreadable.
+                            borderColor="#1f1f1f"
+                            backgroundColor="#ffffff"
+                            paddingX={1}
+                          >
+                            <Text bold color="#1f1f1f">{head}</Text>
+                            {body ? <Text wrap="truncate-start" color="#1f1f1f">{body}</Text> : null}
+                            {p.thought && !p.endedAt ? <Text wrap="wrap" italic color="#5a554b">💭 {p.thought}</Text> : null}
+                            <Text color="#6b675e">
+                              {p.id === 'main' ? 'Claude' : p.label} · <Text color="#c15f3c" bold>{ROLE_NAME[p.role] ?? 'Agent'}</Text> · {p.reads} read · {p.writes} edited
+                            </Text>
+                          </Box>
+                        ) : null}
+                      </Box>
+                    </Box>,
+                  ]
+                })}
+              </Box>,
+            ])}
           </Box>
         </Box>
       )
